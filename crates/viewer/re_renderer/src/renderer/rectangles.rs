@@ -10,6 +10,7 @@
 //! Since we're not allowed to bind many textures at once (no widespread bindless support!),
 //! we are forced to have individual bind groups per rectangle and thus a draw call per rectangle.
 
+use enumset::EnumSet;
 use itertools::{Itertools as _, izip};
 use smallvec::smallvec;
 
@@ -408,6 +409,16 @@ struct RectangleInstance {
     center_position: glam::Vec3A,
     bind_group: GpuBindGroup,
     draw_outline_mask: bool,
+    depth_offset: DepthOffset,
+    is_transparent: bool,
+}
+
+impl RectangleInstance {
+    #[inline]
+    fn depth_offset_for_sorting(&self) -> i32 {
+        // Higher depth offsets push toward the viewer and should be considered "nearer".
+        self.depth_offset as i32
+    }
 }
 
 #[derive(Clone)]
@@ -428,10 +439,19 @@ impl DrawData for RectangleDrawData {
         // 2D setup we have so far.
 
         for (index, instance) in self.instances.iter().enumerate() {
-            let mut phases = DrawPhase::Opaque | DrawPhase::PickingLayer;
+            let mut phases = EnumSet::only(DrawPhase::PickingLayer);
+            if instance.is_transparent {
+                phases.insert(DrawPhase::Transparent);
+            } else {
+                phases.insert(DrawPhase::Opaque);
+            }
             if instance.draw_outline_mask {
                 phases.insert(DrawPhase::OutlineMask);
             }
+
+            // Use depth offset as secondary sort key so 2D layering follows draw order semantics
+            // even if draw data submission order changes.
+            let secondary_sort_key = instance.depth_offset_for_sorting();
 
             collector.add_drawable(
                 phases,
@@ -439,7 +459,8 @@ impl DrawData for RectangleDrawData {
                     view_info,
                     instance.center_position,
                     index as u32,
-                ),
+                )
+                .with_secondary_sort_key(secondary_sort_key),
             );
         }
     }
@@ -532,6 +553,12 @@ impl RectangleDrawData {
                     },
                 ),
                 draw_outline_mask: rectangle.options.outline_mask.is_some(),
+                depth_offset: rectangle.options.depth_offset,
+                is_transparent: rectangle.options.multiplicative_tint.a() < 0.999
+                    || !matches!(
+                        rectangle.colormapped_texture.texture_alpha,
+                        TextureAlpha::Opaque
+                    ),
             });
         }
 
@@ -540,7 +567,8 @@ impl RectangleDrawData {
 }
 
 pub struct RectangleRenderer {
-    render_pipeline_color: GpuRenderPipelineHandle,
+    render_pipeline_color_opaque: GpuRenderPipelineHandle,
+    render_pipeline_color_transparent: GpuRenderPipelineHandle,
     render_pipeline_picking_layer: GpuRenderPipelineHandle,
     render_pipeline_outline_mask: GpuRenderPipelineHandle,
     bind_group_layout: GpuBindGroupLayoutHandle,
@@ -661,8 +689,18 @@ impl Renderer for RectangleRenderer {
             depth_stencil: Some(ViewBuilder::MAIN_TARGET_DEFAULT_DEPTH_STATE),
             multisample: ViewBuilder::main_target_default_msaa_state(ctx.render_config(), false),
         };
-        let render_pipeline_color =
+        let render_pipeline_color_opaque =
             render_pipelines.get_or_create(ctx, &render_pipeline_desc_color);
+        let mut transparent_depth_state = ViewBuilder::MAIN_TARGET_DEFAULT_DEPTH_STATE;
+        transparent_depth_state.depth_write_enabled = false;
+        let render_pipeline_color_transparent = render_pipelines.get_or_create(
+            ctx,
+            &(RenderPipelineDesc {
+                label: "RectangleRenderer::render_pipeline_color_transparent".into(),
+                depth_stencil: Some(transparent_depth_state),
+                ..render_pipeline_desc_color.clone()
+            }),
+        );
         let render_pipeline_picking_layer = render_pipelines.get_or_create(
             ctx,
             &(RenderPipelineDesc {
@@ -687,7 +725,8 @@ impl Renderer for RectangleRenderer {
         );
 
         Self {
-            render_pipeline_color,
+            render_pipeline_color_opaque,
+            render_pipeline_color_transparent,
             render_pipeline_picking_layer,
             render_pipeline_outline_mask,
             bind_group_layout,
@@ -704,7 +743,8 @@ impl Renderer for RectangleRenderer {
         re_tracing::profile_function!();
 
         let pipeline_handle = match phase {
-            DrawPhase::Opaque => self.render_pipeline_color,
+            DrawPhase::Opaque => self.render_pipeline_color_opaque,
+            DrawPhase::Transparent => self.render_pipeline_color_transparent,
             DrawPhase::PickingLayer => self.render_pipeline_picking_layer,
             DrawPhase::OutlineMask => self.render_pipeline_outline_mask,
             _ => unreachable!("We were called on a phase we weren't subscribed to: {phase:?}"),

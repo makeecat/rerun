@@ -60,6 +60,12 @@ pub struct DrawDataDrawable {
     /// Sorting for NaN is considered undefined.
     pub distance_sort_key: f32,
 
+    /// Additional tie-breaker for drawables at the same distance.
+    ///
+    /// This is renderer specific. For rectangles we use this to encode depth offsets so ordering
+    /// honors 2D layering rather than collection order.
+    pub secondary_sort_key: i32,
+
     /// Key for identifying the drawable within the [`DrawData`] that produced it..
     ///
     /// This is effectively an arbitrary payload whose meaning is dependent on the drawable type
@@ -85,8 +91,15 @@ impl DrawDataDrawable {
     ) -> Self {
         Self {
             distance_sort_key: world_position.distance_squared(view_info.camera_world_position),
+            secondary_sort_key: 0,
             draw_data_payload,
         }
+    }
+
+    #[inline]
+    pub fn with_secondary_sort_key(mut self, secondary_sort_key: i32) -> Self {
+        self.secondary_sort_key = secondary_sort_key;
+        self
     }
 }
 

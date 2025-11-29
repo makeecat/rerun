@@ -80,6 +80,7 @@ impl DrawData for WorldGridDrawData {
                 // We could use distance from the plane, but we rather use a stable sorting here to avoid flickering,
                 // therefore we want to draw it before any other "real" transparentobjects.
                 distance_sort_key: -1.0,
+                secondary_sort_key: 0,
                 draw_data_payload: 0,
             },
         );
